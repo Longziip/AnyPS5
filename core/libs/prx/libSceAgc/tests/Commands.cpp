@@ -632,12 +632,14 @@ void testDefaults() {
     check(sceAgcInit(0xffffc278u) == 0, "pointer-valued AGC argument did not return success");
     for (std::uint32_t version = 0; version < 14; ++version) {
         for (const bool internal : {false, true}) {
-            auto* first = Agc::Command::GetRegisterDefaults(version, internal, __func__);
-            check(first != nullptr && first == Agc::Command::GetRegisterDefaults(version, internal, __func__), "unstable register defaults pointer");
+            for (const bool compactTypes : {false, true}) {
+                auto* first = Agc::Command::GetRegisterDefaults(version, internal, __func__, compactTypes);
+                check(first != nullptr && first == Agc::Command::GetRegisterDefaults(version, internal, __func__, compactTypes), "unstable register defaults pointer");
+            }
         }
     }
     auto* internalDefaults = sceAgcGetRegisterDefaultsInternal();
-    check(internalDefaults != nullptr && internalDefaults == Agc::Command::GetRegisterDefaults(0, true, __func__) && internalDefaults == sceAgcGetRegisterDefaults2Internal(0), "internal register defaults are not the baseline internal table");
+    check(internalDefaults != nullptr && internalDefaults == Agc::Command::GetRegisterDefaults(0, true, __func__) && std::memcmp(internalDefaults, sceAgcGetRegisterDefaults2Internal(0), 0x30) == 0, "internal register defaults are not the baseline internal table");
     check(internalDefaults != sceAgcGetRegisterDefaults(), "internal register defaults returned the public table");
     constexpr int kInvalidArgument = static_cast<int>(0x80890001u);
     std::array<std::uint32_t, 512> flatCxBuffer{};
@@ -658,15 +660,10 @@ void testDefaults() {
     expectFailure([] { Agc::Command::GetRegisterDefaults(0xffffffffu, true, __func__); });
 }
 
-struct DefaultsType {
-    std::uint32_t key;
-    std::uint32_t bankIndex;
-};
-
-std::uint32_t colourTargetBlock(const void* root) {
+std::uint32_t colourTargetBlock(const void* root, std::size_t entryBytes) {
     const auto* bytes = static_cast<const unsigned char*>(root);
     ShaderRegister** contextBlocks = nullptr;
-    const DefaultsType* types = nullptr;
+    const unsigned char* types = nullptr;
     std::uint32_t count = 0;
     std::memcpy(&contextBlocks, bytes, sizeof(contextBlocks));
     std::memcpy(&types, bytes + 0x30, sizeof(types));
@@ -676,12 +673,16 @@ std::uint32_t colourTargetBlock(const void* root) {
     std::uint32_t matches = 0;
     std::uint32_t block = 0;
     for (std::uint32_t entry = 0; entry < count; ++entry) {
-        if ((types[entry].bankIndex & 3u) == 0)
+        std::uint32_t key = 0;
+        std::uint32_t bankIndex = 0;
+        std::memcpy(&key, types + entry * entryBytes, sizeof(key));
+        std::memcpy(&bankIndex, types + entry * entryBytes + 4, sizeof(bankIndex));
+        if ((bankIndex & 3u) == 0)
             ++contexts;
-        if (types[entry].key != 0x38e92c91u)
+        if (key != 0x38e92c91u)
             continue;
-        check((types[entry].bankIndex & 3u) == 0, "MRT0 defaults are not in the context bank");
-        block = types[entry].bankIndex >> 2;
+        check((bankIndex & 3u) == 0, "MRT0 defaults are not in the context bank");
+        block = (bankIndex & 0x3fcu) >> 2;
         ++matches;
     }
     check(matches == 1 && block < contexts && contextBlocks[block] != nullptr, "MRT0 defaults key is missing, repeated or outside the context blocks");
@@ -692,11 +693,14 @@ std::uint32_t colourTargetBlock(const void* root) {
 }
 
 void testDefaultsTypes() {
-    check(sceAgcGetRegisterDefaults() == sceAgcGetRegisterDefaults2(13), "legacy register defaults are not the newest public table");
-    check(colourTargetBlock(sceAgcGetRegisterDefaults()) == 78, "MRT0 defaults are not block 78 of the 137-entry table");
-    check(colourTargetBlock(sceAgcGetRegisterDefaults2(10)) == 73, "MRT0 defaults are not block 73 of the 128-entry table");
+    const auto* legacy = static_cast<const unsigned char*>(sceAgcGetRegisterDefaults());
+    const auto* versioned = static_cast<const unsigned char*>(sceAgcGetRegisterDefaults2(13));
+    check(std::memcmp(legacy, versioned, 0x30) == 0, "legacy register defaults do not share the newest public table's blocks");
+    check(colourTargetBlock(legacy, 8) == 78, "MRT0 defaults are not block 78 of the 137-entry table in the legacy type pairs");
+    check(colourTargetBlock(versioned, 12) == 78, "MRT0 defaults are not block 78 of the 137-entry table in the versioned 12-byte type entries");
+    check(colourTargetBlock(sceAgcGetRegisterDefaults2(10), 12) == 73, "MRT0 defaults are not block 73 of the 128-entry table");
     for (std::uint32_t version = 4; version < 14; ++version)
-        colourTargetBlock(sceAgcGetRegisterDefaults2(version));
+        colourTargetBlock(sceAgcGetRegisterDefaults2(version), 12);
 }
 
 void testEventWrite() {

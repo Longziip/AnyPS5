@@ -22,7 +22,7 @@ static_assert(sizeof(TypeIndex) == 8);
 struct RegisterDefaults {
     ShaderRegister** tables[4];
     std::uint32_t registerCounts[4];
-    TypeIndex* types;
+    const void* types;
     std::uint32_t count;
 };
 
@@ -46,6 +46,7 @@ struct CompactRegisterDefaults {
 
 struct Storage {
     RegisterDefaults defaults{};
+    RegisterDefaults compact{};
     std::array<std::vector<ShaderRegister*>, 4> pointers;
     std::vector<TypeIndex> types;
     bool initialized = false;
@@ -83,7 +84,7 @@ void InitDefaultCxState() {
 
 }
 
-void* GetRegisterDefaults(std::uint32_t version, bool internal, const char* function) {
+void* GetRegisterDefaults(std::uint32_t version, bool internal, const char* function, bool compactTypes) {
     Require(version < 14, function, "unsupported register defaults version");
     const auto* source = internal ? agcInternalRegDefaultsByVersion[version] : agcPublicRegDefaultsByVersion[version];
     std::lock_guard lock(defaultsMutex);
@@ -116,9 +117,11 @@ void* GetRegisterDefaults(std::uint32_t version, bool internal, const char* func
         destination.pointers = std::move(pointers);
         destination.types = std::move(types);
         destination.defaults = defaults;
+        destination.compact = defaults;
+        destination.compact.types = source->count == 0 ? nullptr : source->types;
         destination.initialized = true;
     }
-    return &destination.defaults;
+    return compactTypes ? &destination.compact : &destination.defaults;
 }
 
 int GetDefaultCxStateFlat(void* destination, std::uint32_t size) {
